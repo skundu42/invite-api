@@ -1,7 +1,7 @@
 import dotenv from 'dotenv';
 import express from 'express';
 import { ethers } from 'ethers';
-import Safe from '@safe-global/protocol-kit';
+//import Safe from '@safe-global/protocol-kit';
 
 dotenv.config();
 
@@ -14,10 +14,15 @@ const TRUST_SIGNER = trustPrivateKey;
 
 const RPC_URL = 'https://1rpc.io/gnosis';
 const HUB_ADDRESS = '0xc12C1E50ABB450d6205Ea2C3Fa861b3B834d13e8';
-const TRUST_SAFE_ADDRESS = '0xb59Eb7D8dc6CFb34e6069c995c5323CE76254143';
+const GNOSIS_PAY_GROUP_ADDRESS = '0xb629a1e86F3eFada0F87C83494Da8Cc34C3F84ef';
+const DUBLIN_GROUP_ADDRESS = '0xAeCda439CC8Ac2a2da32bE871E0C2D7155350f80';
+const TRUST_EXPIRY = BigInt('79228162514264337593543950335'); 
+const TRUST_GROUP_ABI = ['function trustBatchWithConditions(address[] _members, uint96 _expiry) public'];
+
 const rpcProvider = new ethers.JsonRpcProvider(RPC_URL);
 const trustSignerWallet = new ethers.Wallet(TRUST_SIGNER, rpcProvider);
-const TRUST_SIGNER_ADDRESS = trustSignerWallet.address;
+const gnosisPayGroup = new ethers.Contract(GNOSIS_PAY_GROUP_ADDRESS, TRUST_GROUP_ABI, trustSignerWallet);
+const dublinGroup = new ethers.Contract(DUBLIN_GROUP_ADDRESS, TRUST_GROUP_ABI, trustSignerWallet);
 
 
 
@@ -57,8 +62,25 @@ app.post('/onboard', validateApiKey, async (req, res) => {
       return res.status(400).json({ error: 'Invalid Ethereum address. Only checksum address allowed' });
     }
 
+    let normalizedAddress: string;
+    try {
+      normalizedAddress = validateAndChecksumAddress(address);
+    } catch (err) {
+      return res.status(400).json({
+        error: err instanceof Error ? err.message : 'Invalid Ethereum address',
+      });
+    }
 
-    res.status(200).json({ message: 'Okay' });
+    const txHashes = await trustAcrossGroups(normalizedAddress);
+
+    res.status(200).json({
+      message: 'Trusted member across groups',
+      address: normalizedAddress,
+      transactions: {
+        gnosisPayGroup: txHashes.gnosisPayGroupTxHash,
+        dublinGroup: txHashes.dublinGroupTxHash,
+      },
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({
@@ -79,4 +101,33 @@ function ensureValidTrustee(address: string) {
   if (!ethers.isAddress(address)) {
     throw new Error('Invalid trustee address');
   }
+}
+
+function validateAndChecksumAddress(address: string) {
+  try {
+    return ethers.getAddress(address);
+  } catch {
+    throw new Error('Invalid Ethereum address');
+  }
+}
+
+async function trustAcrossGroups(address: string) {
+  const members = [address];
+
+  const gnosisPayGroupTx = await gnosisPayGroup.trustBatchWithConditions(members, TRUST_EXPIRY);
+  const gnosisPayGroupReceipt = await gnosisPayGroupTx.wait();
+  if (gnosisPayGroupReceipt?.status !== 1) {
+    throw new Error('Failed to trust member in Gnosis Pay group');
+  }
+
+  const dublinGroupTx = await dublinGroup.trustBatchWithConditions(members, TRUST_EXPIRY);
+  const dublinGroupReceipt = await dublinGroupTx.wait();
+  if (dublinGroupReceipt?.status !== 1) {
+    throw new Error('Failed to trust member in Dublin group');
+  }
+
+  return {
+    gnosisPayGroupTxHash: gnosisPayGroupTx.hash,
+    dublinGroupTxHash: dublinGroupTx.hash,
+  };
 }
