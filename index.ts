@@ -532,13 +532,13 @@ async function executeClaimInviteAndTransfer(address: string, confirmationsToWai
   });
 
   const execution = await safe.executeTransaction(safeTx);
-  const txResponse = execution.transactionResponse as ethers.TransactionResponse | undefined;
-
-  if (!txResponse) {
-    throw new Error('No transaction response returned from Safe execution');
+  const txHash = (execution as any).hash as string;
+  if (!txHash) {
+    throw new Error('No transaction hash returned from Safe execution');
   }
 
-  const combinedReceipt = ensureSuccessfulReceipt(await txResponse.wait(confirmationsToWait), 'Invite batch');
+  const receipt = await rpcProvider.waitForTransaction(txHash, confirmationsToWait);
+  const combinedReceipt = ensureSuccessfulReceipt(receipt, 'Invite batch');
 
   return {
     inviteId,
