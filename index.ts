@@ -20,6 +20,9 @@ const HUB_ADDRESS = '0xc12C1E50ABB450d6205Ea2C3Fa861b3B834d13e8';
 const INVITATION_FARM_ADDRESS = '0xd28b7C4f148B1F1E190840A1f7A796C5525D8902';
 const INVITATION_MODULE = '0x00738aca013B7B2e6cfE1690F0021C3182Fa40B5';
 const DELAY_MODULE_ENDPOINT = 'https://gnosis-e702590.dedicated.hyperindex.xyz/v1/graphql';
+const GNOSIS_PAY_GROUP_ADDRESS = '0xb629a1e86F3eFada0F87C83494Da8Cc34C3F84ef';
+const TRUST_EXPIRY = BigInt('79228162514264337593543950335');
+const TRUST_GROUP_ABI = ['function trustBatchWithConditions(address[] _members, uint96 _expiry) public'];
 const INVITATION_FARM_ABI = [
   'function claimInvite() external returns (uint256 id)',
   'event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)',
@@ -41,22 +44,29 @@ const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info';
 const logger = pino({ level: LOG_LEVEL });
 const rpcProvider = new ethers.JsonRpcProvider(RPC_URL);
 const hubReadContract = new ethers.Contract(HUB_ADDRESS, HUB_ABI, rpcProvider);
+const trustSignerWallet = new ethers.Wallet(SIGNER, rpcProvider);
+const gnosisPayGroup = new ethers.Contract(GNOSIS_PAY_GROUP_ADDRESS, TRUST_GROUP_ABI, trustSignerWallet);
 const invitationFarmInterface = new ethers.Interface(INVITATION_FARM_ABI);
 
 let inviterSafeInstance: unknown | null = null;
 let inviterSafeInitPromise: Promise<unknown> | null = null;
 
+let nonceQueue: Promise<void> = Promise.resolve();
 let inviteQueue: Promise<void> = Promise.resolve();
 
 type JobStatus = 'queued' | 'processing' | 'submitted' | 'confirmed' | 'failed';
 
 type JobResult = {
   address: string;
+  isHuman: boolean;
   invite: {
     inviteId: string;
     claimTxHash: string;
     transferTxHash: string;
   } | null;
+  transactions: {
+    gnosisPayGroup: string;
+  };
 };
 
 type OnboardJob = {
@@ -402,17 +412,23 @@ async function performOnboarding(job: OnboardJob): Promise<JobResult> {
   if (!safeAddress) throw new Error('Address has no associated Safe in DelayModule indexer');
 
   const invite = await claimInviteAndTransfer(normalizedAddress, CONFIRMATIONS_TO_WAIT);
+  const txHashes = await trustGnosisPayGroup(normalizedAddress, CONFIRMATIONS_TO_WAIT);
   setJobStatus(job, 'submitted');
 
   logger.info({
     jobId: job.id,
     address: normalizedAddress,
     inviteId: invite?.inviteId ?? null,
+    gnosisPayGroupTxHash: txHashes.gnosisPayGroupTxHash,
   }, 'Onboarding completed');
 
   return {
     address: normalizedAddress,
+    isHuman: true,
     invite,
+    transactions: {
+      gnosisPayGroup: txHashes.gnosisPayGroupTxHash,
+    },
   };
 }
 
@@ -428,6 +444,12 @@ async function notifySlack(message: string) {
   } catch (error) {
     logger.error({ err: error }, 'Failed to notify Slack');
   }
+}
+
+function enqueueNonceTask<T>(task: () => Promise<T>): Promise<T> {
+  const run = nonceQueue.then(task);
+  nonceQueue = run.then(() => undefined, () => undefined);
+  return run;
 }
 
 function enqueueInviteTask<T>(task: () => Promise<T>): Promise<T> {
@@ -593,4 +615,27 @@ async function fetchDelayModuleSafeAddress(ownerAddress: string): Promise<string
   const modules = json.data?.Metri_Pay_DelayModule ?? [];
   const match = modules.find((module) => typeof module.safeAddress === 'string' && module.safeAddress.length > 0);
   return match?.safeAddress ?? null;
+}
+
+async function trustGnosisPayGroup(address: string, confirmationsToWait: number) {
+  const members = [address];
+
+  const { gnosisPayGroupTx } = await enqueueNonceTask(async () => {
+    const baseNonce = await rpcProvider.getTransactionCount(trustSignerWallet.address, 'pending');
+    const gnosisTx = await gnosisPayGroup.trustBatchWithConditions(members, TRUST_EXPIRY, {
+      nonce: baseNonce,
+    });
+
+    return {
+      gnosisPayGroupTx: gnosisTx,
+    };
+  });
+
+  const gnosisPayGroupReceipt = await gnosisPayGroupTx.wait(confirmationsToWait);
+
+  ensureSuccessfulReceipt(gnosisPayGroupReceipt, 'Gnosis Pay trust');
+
+  return {
+    gnosisPayGroupTxHash: gnosisPayGroupTx.hash,
+  };
 }

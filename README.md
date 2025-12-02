@@ -66,10 +66,14 @@ Job payload shape:
   "status": "queued | processing | submitted | confirmed | failed",
   "address": "0x...",
   "result": {
+    "isHuman": true,
     "invite": {
       "inviteId": "123",
       "claimTxHash": "0x...",
       "transferTxHash": "0x..."
+    },
+    "transactions": {
+      "gnosisPayGroup": "0x..."
     },
     "address": "0x..."
   } | null,
